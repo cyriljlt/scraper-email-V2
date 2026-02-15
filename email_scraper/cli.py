@@ -308,6 +308,13 @@ Examples:
         help="Save logs to file (optional)",
     )
     parser.add_argument(
+        "--save-every",
+        type=int,
+        default=0,
+        help="Save intermediate results every N URLs (crash recovery). "
+             "0 = save only at the end (default: 0)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -347,6 +354,19 @@ def main(argv: Optional[List[str]] = None):
     processed_count = 0
     SAVE_INTERVAL = 100  # Save every 100 URLs
 
+    # Checkpoint save helper: saves raw (unfiltered) emails periodically
+    # so no data is lost on crash. Filtering is applied only at the end.
+    urls_processed = 0
+
+    def _checkpoint_save():
+        """Save raw emails to output CSV as crash recovery checkpoint."""
+        if args.save_every > 0 and all_emails and not args.dry_run:
+            save_csv(all_emails, args.output)
+            logger.info(
+                "Checkpoint: saved %d raw emails after %d/%d URLs",
+                len(all_emails), urls_processed, len(urls),
+            )
+
     if args.threads > 1:
         # Parallel execution
         logger.info("Starting parallel scraping with %d threads", args.threads)
@@ -384,6 +404,8 @@ def main(argv: Optional[List[str]] = None):
                         errors.append(f"Unexpected error for {url}: {e}")
                         processed_count += 1
                     pbar.update(1)
+                    if args.save_every > 0 and urls_processed % args.save_every == 0:
+                        _checkpoint_save()
     else:
         # Sequential execution
         logger.info("Starting sequential scraping")
