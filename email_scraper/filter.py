@@ -1,0 +1,174 @@
+"""Campaign-ready email filtering.
+
+Filters out emails that are not useful for B2B email campaigns:
+- Web agencies, hosting providers, free email providers
+- Non-business roles (DPO, RGPD, noreply, abuse, etc.)
+- Emails whose domain doesn't match the target site
+- Low-confidence emails below a score threshold
+"""
+
+import re
+import logging
+from typing import Dict, List, Optional, Set
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+
+# Free email / ISP / webmail domains — never useful for B2B campaigns
+FREE_EMAIL_DOMAINS = {
+    # French ISPs
+    "orange.fr", "wanadoo.fr", "free.fr", "sfr.fr", "bbox.fr",
+    "numericable.fr", "laposte.net", "neuf.fr", "alice.fr",
+    # Global webmail
+    "gmail.com", "googlemail.com", "outlook.com", "outlook.fr",
+    "hotmail.com", "hotmail.fr", "live.com", "live.fr",
+    "yahoo.com", "yahoo.fr", "ymail.com",
+    "msn.com", "aol.com", "aol.fr", "icloud.com", "me.com",
+    "mail.com", "protonmail.com", "proton.me", "tutanota.com",
+    "gmx.com", "gmx.fr", "zoho.com",
+}
+
+# Hosting / registrar / SaaS tool domains — not the business itself
+TOOL_DOMAINS = {
+    "ovh.com", "ovh.net", "gandi.net", "ionos.com", "1and1.com",
+    "wix.com", "wixpress.com", "squarespace.com", "wordpress.com",
+    "hubspot.com", "mailchimp.com", "sendinblue.com", "brevo.com",
+    "sentry.io", "cloudflare.com", "amazonaws.com",
+    "google.com", "microsoft.com", "apple.com",
+}
+
+# Email local parts that are NOT useful for campaigns
+# These are functional/compliance roles, not decision-makers or contacts
+NON_CAMPAIGN_LOCAL_PARTS = {
+    # Privacy/compliance
+    "dpo", "rgpd", "gdpr", "privacy", "donnees-personnelles",
+    # System/technical
+    "abuse", "postmaster", "hostmaster", "webmaster", "root",
+    "noreply", "no-reply", "no_reply", "ne-pas-repondre",
+    "mailer-daemon", "daemon",
+    # Too generic / useless
+    "test", "dev", "staging", "demo",
+}
+
+
+def is_campaign_worthy(
+    email: str,
+    target_domain: str,
+    require_domain_match: bool = True,
+) -> bool:
+    """
+    Check if an email is suitable for a B2B email campaign.
+
+    Args:
+        email: The email address to check
+        target_domain: The domain of the website being scraped
+        require_domain_match: If True, reject emails from different domains
+
+    Returns:
+        True if the email should be kept for campaigns
+    """
+    if "@" not in email:
+        return False
+
+    local, domain = email.rsplit("@", 1)
+    domain = domain.lower()
+    local = local.lower()
+
+    # Strip www for comparison
+    clean_target = re.sub(r"^www\.", "", target_domain.lower())
+    clean_email_domain = re.sub(r"^www\.", "", domain)
+
+    # 1. Reject free email / ISP domains
+    if clean_email_domain in FREE_EMAIL_DOMAINS:
+        logger.debug("Filtered %s: free email provider", email)
+        return False
+
+    # 2. Reject known tool/hosting domains
+    if clean_email_domain in TOOL_DOMAINS:
+        logger.debug("Filtered %s: tool/hosting domain", email)
+        return False
+
+    # 3. Reject non-campaign local parts
+    # Check exact match and prefix match (e.g., "noreply-xxx@")
+    if local in NON_CAMPAIGN_LOCAL_PARTS:
+        logger.debug("Filtered %s: non-campaign role", email)
+        return False
+    for prefix in NON_CAMPAIGN_LOCAL_PARTS:
+        if local.startswith(prefix + "-") or local.startswith(prefix + "_"):
+            logger.debug("Filtered %s: non-campaign role prefix", email)
+            return False
+
+    # 4. Domain match check
+    if require_domain_match:
+        # Allow exact match or subdomain relationship
+        if clean_email_domain != clean_target:
+            if not (
+                clean_target.endswith("." + clean_email_domain)
+                or clean_email_domain.endswith("." + clean_target)
+            ):
+                logger.debug(
+                    "Filtered %s: domain mismatch (email=%s, target=%s)",
+                    email, clean_email_domain, clean_target,
+                )
+                return False
+
+    return True
+
+
+def filter_results(
+    results: list,
+    min_score: float = 0.7,
+    require_domain_match: bool = True,
+) -> list:
+    """
+    Filter email results for campaign use.
+
+    Args:
+        results: List of EmailResult objects
+        min_score: Minimum confidence score (0.0-1.0)
+        require_domain_match: If True, only keep emails matching site domain
+
+    Returns:
+        Filtered list of EmailResult objects
+    """
+    original_count = len(results)
+    filtered = []
+
+    for r in results:
+        # Score threshold
+        if r.confidence_score < min_score:
+            logger.debug(
+                "Filtered %s: score %.2f < %.2f",
+                r.email, r.confidence_score, min_score,
+            )
+            continue
+
+        # Extract target domain from the input URL
+        target_domain = _extract_domain(r.url)
+
+        # Campaign worthiness check
+        if not is_campaign_worthy(r.email, target_domain, require_domain_match):
+            continue
+
+        filtered.append(r)
+
+    removed = original_count - len(filtered)
+    if removed > 0:
+        logger.info(
+            "Filtering: %d → %d emails (%d removed)",
+            original_count, len(filtered), removed,
+        )
+
+    return filtered
+
+
+def _extract_domain(url: str) -> str:
+    """Extract clean domain from URL."""
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    netloc = urlparse(url).netloc.lower()
+    netloc = re.sub(r"^www\.", "", netloc)
+    netloc = netloc.split(":")[0]
+    return netloc

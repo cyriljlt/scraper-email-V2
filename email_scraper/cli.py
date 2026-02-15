@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from . import __version__
 from .scraper import EmailScraper, ScrapeResult, EmailResult
+from .filter import filter_results
 
 logger = logging.getLogger("email_scraper")
 
@@ -238,6 +239,17 @@ Examples:
         help="Webhook URL for completion notification (optional)",
     )
     parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.7,
+        help="Minimum confidence score to keep an email (default: 0.7)",
+    )
+    parser.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="Disable campaign filtering (keep all emails including agencies, DPO, etc.)",
+    )
+    parser.add_argument(
         "--no-robots",
         action="store_true",
         help="Ignore robots.txt restrictions",
@@ -341,12 +353,24 @@ def main(argv: Optional[List[str]] = None):
 
     duration = time.time() - start_time
 
+    # Apply campaign filtering
+    raw_count = len(all_emails)
+    if not args.no_filter and not args.dry_run:
+        all_emails = filter_results(
+            all_emails,
+            min_score=args.min_score,
+            require_domain_match=True,
+        )
+
     # Summary
     print(f"\n{'=' * 60}")
     print(f"Scraping complete")
     print(f"{'=' * 60}")
     print(f"  URLs processed:  {len(urls)}")
-    print(f"  Emails found:    {len(all_emails)}")
+    print(f"  Emails found:    {raw_count}")
+    if not args.no_filter and not args.dry_run:
+        print(f"  After filtering: {len(all_emails)}  (min score: {args.min_score})")
+        print(f"  Filtered out:    {raw_count - len(all_emails)}")
     print(f"  Errors:          {len(errors)}")
     print(f"  Duration:        {duration:.1f}s")
     print(f"{'=' * 60}")
