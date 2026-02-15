@@ -7,6 +7,37 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Hosted website builder / platform domains.
+# Sites on these platforms use the platform's domain, so the business email
+# will naturally have a DIFFERENT domain. This is expected, not suspicious.
+HOSTED_PLATFORM_DOMAINS = {
+    "site-solocal.com",
+    "solocal.com",
+    "wixsite.com",
+    "weebly.com",
+    "squarespace.com",
+    "jimdo.com",
+    "webnode.fr",
+    "webnode.com",
+    "monsite-orange.fr",
+    "e-monsite.com",
+    "sitew.com",
+    "hubside.fr",
+    "wordpress.com",
+    "blogspot.com",
+    "shopify.com",
+    "strikingly.com",
+}
+
+
+def _is_hosted_platform(site_domain: str) -> bool:
+    """Check if a site domain belongs to a hosted website builder."""
+    site_domain = site_domain.lower()
+    for platform in HOSTED_PLATFORM_DOMAINS:
+        if site_domain == platform or site_domain.endswith("." + platform):
+            return True
+    return False
+
 
 def compute_confidence(
     email: str,
@@ -60,6 +91,11 @@ def compute_confidence(
     elif clean_site in clean_email_domain or clean_email_domain in clean_site:
         score += 0.20  # Partial match (subdomain)
         domain_match = "partial"
+    elif _is_hosted_platform(clean_site):
+        # Site is on a hosted platform (Solocal, Wix, etc.) — the business
+        # email naturally uses a different domain. This is expected.
+        score += 0.20
+        domain_match = "hosted"
     else:
         # Different domain: likely a third-party (web agency, service provider)
         # Strong penalty — these are almost never the business's own email
@@ -80,7 +116,8 @@ def compute_confidence(
     # --- Factor 3b: Extra penalty for third-party emails on legal/mentions pages ---
     # Web agencies are almost always found in mentions légales, not on contact pages.
     # An email with a different domain on a legal page is very likely a web agency.
-    if domain_match == "different":
+    # Skip this penalty for hosted platforms where domain mismatch is expected.
+    if domain_match == "different":  # not applied to "hosted"
         is_legal_page = any(
             kw in path for kw in ["/mentions", "/legal", "/impressum", "/cgu",
                                   "/confidentialite", "/privacy", "/rgpd",
