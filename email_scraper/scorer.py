@@ -93,8 +93,9 @@ def compute_confidence(
         domain_match = "partial"
     elif _is_hosted_platform(clean_site):
         # Site is on a hosted platform (Solocal, Wix, etc.) — the business
-        # email naturally uses a different domain. This is expected.
-        score += 0.20
+        # email naturally uses a different domain. This is expected and
+        # the email IS the business's real email, so treat like exact match.
+        score += 0.30
         domain_match = "hosted"
     else:
         # Different domain: likely a third-party (web agency, service provider)
