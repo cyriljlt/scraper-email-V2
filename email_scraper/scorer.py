@@ -45,20 +45,26 @@ def compute_confidence(
     else:
         score += 0.10
 
-    # --- Factor 2: Domain matching (max 0.30) ---
+    # --- Factor 2: Domain matching (max 0.30, can be negative) ---
     email_domain = email.split("@")[1] if "@" in email else ""
     site_domain = urlparse(page_url).netloc.lower()
 
     # Remove www prefix for comparison
     clean_site = re.sub(r"^www\.", "", site_domain)
-    clean_email = re.sub(r"^www\.", "", email_domain)
+    clean_email_domain = re.sub(r"^www\.", "", email_domain)
 
-    if clean_email == clean_site:
+    domain_match = "different"
+    if clean_email_domain == clean_site:
         score += 0.30  # Perfect domain match
-    elif clean_site in clean_email or clean_email in clean_site:
+        domain_match = "exact"
+    elif clean_site in clean_email_domain or clean_email_domain in clean_site:
         score += 0.20  # Partial match (subdomain)
+        domain_match = "partial"
     else:
-        score += 0.05  # Different domain (could be valid: gmail, etc.)
+        # Different domain: likely a third-party (web agency, service provider)
+        # Apply a penalty instead of a bonus
+        score -= 0.10
+        domain_match = "different"
 
     # --- Factor 3: Page type (max 0.20) ---
     path = urlparse(page_url).path.lower()
@@ -71,6 +77,18 @@ def compute_confidence(
     else:
         score += 0.08  # Homepage or other page
 
+    # --- Factor 3b: Extra penalty for third-party emails on legal/mentions pages ---
+    # Web agencies are almost always found in mentions légales, not on contact pages.
+    # An email with a different domain on a legal page is very likely a web agency.
+    if domain_match == "different":
+        is_legal_page = any(
+            kw in path for kw in ["/mentions", "/legal", "/impressum", "/cgu",
+                                  "/confidentialite", "/privacy", "/rgpd",
+                                  "/donnees-personnelles"]
+        )
+        if is_legal_page:
+            score -= 0.10  # Strong penalty: different domain on legal page
+
     # --- Factor 4: Semantic context (max 0.15) ---
     context_score = _check_context(email, page_text)
     score += context_score * 0.15
@@ -80,7 +98,7 @@ def compute_confidence(
     quality_score = _assess_local_part(local_part)
     score += quality_score * 0.10
 
-    final_score = round(min(score, 1.0), 2)
+    final_score = round(max(min(score, 1.0), 0.0), 2)
     logger.debug("Confidence for %s on %s: %.2f", email, page_url, final_score)
     return final_score
 

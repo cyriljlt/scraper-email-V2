@@ -98,6 +98,7 @@ def clean_email(raw: str) -> Optional[str]:
     surrounding content like "098775contact@nom-de-domaine.frDécouvrez".
 
     Strategy:
+    0. Strip JSON/HTML Unicode escape prefixes (u003e → ">")
     1. Fix the TLD: if the captured TLD isn't valid, find the longest
        valid TLD prefix (e.g., "frDécouvrez" → "fr")
     2. Fix the local part: strip leading digit sequences that look like
@@ -105,6 +106,11 @@ def clean_email(raw: str) -> Optional[str]:
     """
     if '@' not in raw:
         return None
+
+    # --- Strip Unicode escape artifacts ---
+    # JSON-encoded HTML produces things like "u003epierremarie.desnoe@compta.com"
+    # where u003e is the escaped ">" character
+    raw = re.sub(r'^u[0-9a-fA-F]{4}', '', raw)
 
     local, domain = raw.rsplit('@', 1)
 
@@ -196,21 +202,44 @@ def validate_email(email: str) -> bool:
     if all(part.isdigit() for part in parts):
         return False
 
+    # Reject Sentry DSN (hex hash @ *.ingest.*.sentry.io)
+    if 'sentry.io' in domain:
+        return False
+
+    # Reject local parts that look like hashes (32+ hex chars = Sentry DSN, tracking IDs)
+    if re.match(r'^[0-9a-f]{32,}$', local):
+        return False
+
     # Reject common placeholder/invalid emails
-    invalid_locals = {
-        'example', 'test', 'admin', 'null', 'undefined',
-        'no-reply', 'noreply', 'mailer-daemon',
-    }
     invalid_domains = {
         'example.com', 'example.org', 'example.net',
         'test.com', 'localhost', 'domain.com',
         'email.com', 'your-domain.com', 'yourdomain.com',
-        'sentry.io', 'wixpress.com',
+        'mail.com',  # example@mail.com
+        'wixpress.com',
     }
-
-    if local in invalid_locals and domain in invalid_domains:
-        return False
     if domain in invalid_domains:
+        return False
+
+    # Reject French placeholder names (jean.dupont@gmail.com, jacques@martin.com, etc.)
+    # These are the French equivalent of "John Doe" / "Jane Smith"
+    _PLACEHOLDER_FIRSTNAMES = {
+        'jean', 'jacques', 'pierre', 'paul', 'marie', 'dupont',
+        'durand', 'martin', 'bernard', 'thomas', 'robert',
+    }
+    _PLACEHOLDER_PATTERNS = {
+        # jean.dupont@gmail.com, jean.martin@gmail.com, etc.
+        'jean.dupont', 'jean.martin', 'jean.durand', 'jean.bernard',
+        'pierre.dupont', 'pierre.martin', 'pierre.durand',
+        'marie.dupont', 'marie.martin', 'paul.dupont', 'paul.martin',
+        'jacques.dupont', 'jacques.martin',
+    }
+    # Check full local part match against placeholder patterns
+    if local in _PLACEHOLDER_PATTERNS:
+        return False
+    # Check pattern: placeholder_firstname@common_lastname_domain
+    # e.g., jacques@martin.com (martin.com is a real domain but used as placeholder in FR sites)
+    if local in _PLACEHOLDER_FIRSTNAMES and parts[0] in _PLACEHOLDER_FIRSTNAMES:
         return False
 
     return True
