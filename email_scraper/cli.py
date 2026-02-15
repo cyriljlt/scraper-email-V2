@@ -17,7 +17,11 @@ from tqdm import tqdm
 from . import __version__
 from .scraper import EmailScraper, ScrapeResult, EmailResult
 from .filter import filter_results
-from .google_search import search_google, search_multiple_keywords
+from .google_maps import (
+    search_google_maps,
+    search_maps_multiple_keywords,
+    BusinessListing,
+)
 
 logger = logging.getLogger("email_scraper")
 
@@ -86,31 +90,18 @@ def load_urls(input_path: str) -> List[str]:
 
 
 def _extract_root_domain(url: str) -> str:
-    """Extract root domain from URL for deduplication.
-
-    Normalizes: http/https, www prefix, trailing paths, query strings.
-    Examples:
-        https://www.tacher-acogex.com/nous-connaitre/falaise/ → tacher-acogex.com
-        http://www.tacher-acogex.com/ → tacher-acogex.com
-        tacher-acogex.com → tacher-acogex.com
-    """
+    """Extract root domain from URL for deduplication."""
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
     netloc = urlparse(url).netloc.lower()
-    # Strip www. prefix
     netloc = re.sub(r"^www\.", "", netloc)
-    # Strip port if present
     netloc = netloc.split(":")[0]
     return netloc
 
 
 def deduplicate_urls(urls: List[str]) -> List[str]:
-    """Deduplicate URLs by root domain, keeping the first occurrence.
-
-    When the CSV has multiple URLs for the same site (http vs https,
-    with/without www, different subpages), keep only one per domain.
-    """
+    """Deduplicate URLs by root domain, keeping the first occurrence."""
     seen: Dict[str, str] = {}
     for url in urls:
         domain = _extract_root_domain(url)
@@ -119,7 +110,7 @@ def deduplicate_urls(urls: List[str]) -> List[str]:
     deduped = list(seen.values())
     if len(deduped) < len(urls):
         logger.info(
-            "Deduplicated %d URLs → %d unique domains (removed %d duplicates)",
+            "Deduplicated %d URLs -> %d unique domains (removed %d duplicates)",
             len(urls), len(deduped), len(urls) - len(deduped)
         )
     return deduped
@@ -145,9 +136,55 @@ def save_csv(results: List[EmailResult], output_path: str):
     logger.info("Results saved to %s (%d rows)", output_path, len(df))
 
 
-def save_json(results: List[EmailResult], output_path: str):
+def save_search_csv(
+    listings: List[BusinessListing],
+    email_map: Dict[str, List[EmailResult]],
+    output_path: str,
+):
+    """
+    Save Google Maps search results + extracted emails to CSV.
+
+    Columns: name, website, address, category, phone, email, source_page, confidence_score
+    """
+    rows = []
+    for bl in listings:
+        emails = email_map.get(bl.website, [])
+        if emails:
+            for er in emails:
+                rows.append({
+                    "name": bl.name,
+                    "website": bl.website,
+                    "address": bl.address,
+                    "category": bl.category,
+                    "phone": bl.phone,
+                    "email": er.email,
+                    "source_page": er.source_page,
+                    "confidence_score": er.confidence_score,
+                })
+        else:
+            # Keep the business even if no email was found
+            rows.append({
+                "name": bl.name,
+                "website": bl.website,
+                "address": bl.address,
+                "category": bl.category,
+                "phone": bl.phone,
+                "email": "",
+                "source_page": "",
+                "confidence_score": "",
+            })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    logger.info("Results saved to %s (%d rows)", output_path, len(df))
+
+
+def save_json(results, output_path: str):
     """Save results to JSON with full metadata."""
-    data = [r.to_dict() for r in results]
+    if isinstance(results, list) and results and hasattr(results[0], "to_dict"):
+        data = [r.to_dict() for r in results]
+    else:
+        data = results
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     logger.info("JSON results saved to %s", output_path)
@@ -164,7 +201,7 @@ def send_webhook(webhook_url: str, results: List[EmailResult], duration: float):
         "duration_seconds": round(duration, 2),
         "summary": [
             {"url": r.url, "email": r.email, "confidence": r.confidence_score}
-            for r in results[:50]  # First 50 results in summary
+            for r in results[:50]
         ],
     }
 
@@ -240,8 +277,7 @@ def _add_common_scraper_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--allow-free-emails",
         action="store_true",
-        help="Keep emails from free providers (Gmail, Orange, Free, etc.). "
-             "Useful for Solocal/Wix sites where businesses use personal email.",
+        help="Keep emails from free providers (Gmail, Orange, Free, etc.).",
     )
     parser.add_argument(
         "--no-robots",
@@ -283,7 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
         prog="email-scraper",
-        description="Extract emails from websites found via Google search or from a CSV of URLs.",
+        description=(
+            "Scrape Google Maps business listings (site, address, category, phone) "
+            "and extract emails from their websites."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -294,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # --- 'scrape' command (existing behavior) ---
+    # --- 'scrape' command (existing: URLs from CSV) ---
     scrape_parser = subparsers.add_parser(
         "scrape",
         help="Extract emails from URLs listed in a CSV file",
@@ -303,7 +342,6 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   %(prog)s -i urls.csv -o results.csv
   %(prog)s -i urls.csv -o results.csv -t 4 --timeout 20 -vv
-  %(prog)s -i urls.csv -o results.csv --json results.json --cache .cache
         """,
     )
     scrape_parser.add_argument(
@@ -313,31 +351,32 @@ Examples:
     )
     _add_common_scraper_args(scrape_parser)
 
-    # --- 'search' command (new: keywords → Google → emails) ---
+    # --- 'search' command (Google Maps → business info + emails) ---
     search_parser = subparsers.add_parser(
         "search",
-        help="Search Google for keywords, then extract emails from found sites",
+        help="Search Google Maps for businesses, extract info and emails",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s search -k "plombier Paris" -o results.csv
-  %(prog)s search -k "plombier Paris" -k "chauffagiste Paris" -o results.csv -n 50
-  %(prog)s search -k "dentiste Lyon" -o results.csv --lang fr --country fr -vv
-  %(prog)s search -k "electricien Marseille" -o results.csv --save-urls urls_found.csv
+  %(prog)s -k "plombier Paris" -o results.csv
+  %(prog)s -k "plombier Paris" -k "chauffagiste Paris" -o results.csv -n 50
+  %(prog)s -k "dentiste Lyon" -o results.csv --lang fr -vv
+  %(prog)s -k "electricien Marseille" -o results.csv --save-listings fiches.csv
+  %(prog)s -k "restaurant Bordeaux" -o results.csv --no-emails
         """,
     )
     search_parser.add_argument(
         "-k", "--keywords",
         action="append",
         required=True,
-        help="Search keywords (can be specified multiple times for multiple searches). "
-             "Example: -k 'plombier Paris' -k 'chauffagiste Paris'",
+        help="Search keywords (can be specified multiple times). "
+             "Example: -k 'plombier Paris' -k 'chauffagiste Lyon'",
     )
     search_parser.add_argument(
         "-n", "--num-results",
         type=int,
         default=20,
-        help="Number of Google results to collect per keyword group (default: 20)",
+        help="Number of Google Maps results per keyword (default: 20)",
     )
     search_parser.add_argument(
         "--lang",
@@ -355,24 +394,74 @@ Examples:
         "--search-delay",
         type=float,
         default=2.0,
-        help="Delay between Google search pages in seconds (default: 2.0)",
+        help="Delay between search pages in seconds (default: 2.0)",
     )
     search_parser.add_argument(
-        "--save-urls",
+        "--save-listings",
         type=str,
         default=None,
-        help="Save found URLs to a CSV file (optional, useful for re-running scrape later)",
+        help="Save raw Google Maps listings to a separate CSV (without emails)",
+    )
+    search_parser.add_argument(
+        "--no-emails",
+        action="store_true",
+        help="Only extract Google Maps data (site, address, category, phone), "
+             "skip email scraping from websites",
     )
     _add_common_scraper_args(search_parser)
 
     return parser
 
 
-def _save_urls_csv(urls: List[str], output_path: str):
-    """Save a list of URLs to a CSV file."""
-    df = pd.DataFrame({"url": urls})
-    df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    logger.info("URLs saved to %s (%d rows)", output_path, len(urls))
+def _run_scrape(urls: List[str], args) -> tuple:
+    """Run the email scraping pipeline on a list of URLs. Returns (emails, errors)."""
+    scraper_kwargs = {
+        "timeout": args.timeout,
+        "respect_robots": not args.no_robots,
+        "cache_dir": args.cache,
+        "rate_limit": args.rate_limit,
+    }
+    if args.user_agent:
+        scraper_kwargs["user_agent"] = args.user_agent
+
+    all_emails: List[EmailResult] = []
+    errors: List[str] = []
+
+    if args.threads > 1:
+        logger.info("Starting parallel scraping with %d threads", args.threads)
+        scraper = EmailScraper(**scraper_kwargs)
+
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            futures = {
+                executor.submit(scraper.scrape_url, url, args.dry_run): url
+                for url in urls
+            }
+
+            with tqdm(total=len(urls), desc="Scraping emails", unit="site") as pbar:
+                for future in as_completed(futures):
+                    url = futures[future]
+                    try:
+                        result = future.result()
+                        all_emails.extend(result.emails)
+                        errors.extend(result.errors)
+                    except Exception as e:
+                        logger.error("Unexpected error for %s: %s", url, e)
+                        errors.append(f"Unexpected error for {url}: {e}")
+                    pbar.update(1)
+    else:
+        logger.info("Starting sequential scraping")
+        scraper = EmailScraper(**scraper_kwargs)
+
+        for url in tqdm(urls, desc="Scraping emails", unit="site"):
+            try:
+                result = scraper.scrape_url(url, args.dry_run)
+                all_emails.extend(result.emails)
+                errors.extend(result.errors)
+            except Exception as e:
+                logger.error("Unexpected error for %s: %s", url, e)
+                errors.append(f"Unexpected error for {url}: {e}")
+
+    return all_emails, errors
 
 
 def main(argv: Optional[List[str]] = None):
@@ -387,18 +476,19 @@ def main(argv: Optional[List[str]] = None):
     # Setup logging
     setup_logging(args.verbose, args.log_file)
 
-    # Resolve URLs based on command
+    # ========== SEARCH command: Google Maps -> business info + emails ==========
     if args.command == "search":
-        # Google search → collect URLs
-        keyword_groups = [k.split() for k in args.keywords]
-        print(f"\nSearching Google for {len(keyword_groups)} keyword group(s)...")
+        start_time = time.time()
+
+        # Step 1: Search Google Maps
+        print(f"\n--- Google Maps search ---")
         for i, kw in enumerate(args.keywords):
             print(f"  [{i+1}] {kw}")
         print()
 
-        if len(keyword_groups) == 1:
-            urls = search_google(
-                keywords=keyword_groups[0],
+        if len(args.keywords) == 1:
+            listings = search_google_maps(
+                query=args.keywords[0],
                 num_results=args.num_results,
                 lang=args.lang,
                 country=args.country,
@@ -407,8 +497,8 @@ def main(argv: Optional[List[str]] = None):
                 user_agent=args.user_agent,
             )
         else:
-            urls = search_multiple_keywords(
-                keyword_groups=keyword_groups,
+            listings = search_maps_multiple_keywords(
+                keyword_list=args.keywords,
                 num_results_per_keyword=args.num_results,
                 lang=args.lang,
                 country=args.country,
@@ -417,139 +507,155 @@ def main(argv: Optional[List[str]] = None):
                 user_agent=args.user_agent,
             )
 
-        if not urls:
-            logger.error("No URLs found from Google search")
+        if not listings:
+            print("No businesses found on Google Maps.")
             sys.exit(1)
 
-        print(f"Found {len(urls)} unique website(s) from Google search\n")
+        # Display found listings
+        print(f"Found {len(listings)} business(es) on Google Maps:\n")
+        for i, bl in enumerate(listings[:10]):
+            print(f"  {i+1}. {bl.name}")
+            if bl.category:
+                print(f"     Category: {bl.category}")
+            if bl.address:
+                print(f"     Address:  {bl.address}")
+            if bl.phone:
+                print(f"     Phone:    {bl.phone}")
+            if bl.website:
+                print(f"     Website:  {bl.website}")
+            print()
+        if len(listings) > 10:
+            print(f"  ... and {len(listings) - 10} more\n")
 
-        # Optionally save found URLs
-        if args.save_urls:
-            _save_urls_csv(urls, args.save_urls)
-            print(f"URLs saved to {args.save_urls}\n")
+        # Save raw listings if requested
+        if args.save_listings:
+            df = pd.DataFrame([bl.to_dict() for bl in listings])
+            df.to_csv(args.save_listings, index=False, encoding="utf-8-sig")
+            print(f"Raw listings saved to {args.save_listings}\n")
 
+        # Step 2: Extract emails from websites (unless --no-emails)
+        email_map: Dict[str, List[EmailResult]] = {}
+
+        if not args.no_emails and not args.dry_run:
+            websites = [bl.website for bl in listings if bl.website]
+            websites = deduplicate_urls(websites)
+
+            if websites:
+                print(f"Scraping emails from {len(websites)} website(s)...\n")
+                all_emails, errors = _run_scrape(websites, args)
+
+                # Apply filtering
+                raw_count = len(all_emails)
+                if not args.no_filter:
+                    all_emails = filter_results(
+                        all_emails,
+                        min_score=args.min_score,
+                        require_domain_match=True,
+                        max_per_site=args.max_per_site,
+                        allow_free_emails=args.allow_free_emails,
+                    )
+
+                # Build email map: website URL -> list of EmailResult
+                for er in all_emails:
+                    domain = _extract_root_domain(er.url)
+                    for bl in listings:
+                        if bl.website and _extract_root_domain(bl.website) == domain:
+                            email_map.setdefault(bl.website, []).append(er)
+                            break
+
+                duration = time.time() - start_time
+
+                print(f"\n{'=' * 60}")
+                print(f"Search + scrape complete")
+                print(f"{'=' * 60}")
+                print(f"  Businesses found: {len(listings)}")
+                print(f"  With website:     {len(websites)}")
+                print(f"  Emails found:     {raw_count}")
+                if not args.no_filter:
+                    print(f"  After filtering:  {len(all_emails)}  (min score: {args.min_score})")
+                print(f"  Errors:           {len(errors)}")
+                print(f"  Duration:         {duration:.1f}s")
+                print(f"{'=' * 60}")
+            else:
+                print("No websites found in listings, skipping email scraping.\n")
+                duration = time.time() - start_time
+        else:
+            duration = time.time() - start_time
+            if args.no_emails:
+                print("--no-emails: skipping email scraping.\n")
+
+        # Save combined output
+        save_search_csv(listings, email_map, args.output)
+        print(f"\nResults saved to {args.output}")
+
+        # Save JSON if requested
+        if args.json_output:
+            json_data = []
+            for bl in listings:
+                entry = bl.to_dict()
+                emails = email_map.get(bl.website, [])
+                entry["emails"] = [
+                    {"email": er.email, "source_page": er.source_page, "confidence": er.confidence_score}
+                    for er in emails
+                ]
+                json_data.append(entry)
+            save_json(json_data, args.json_output)
+
+        if args.webhook:
+            flat_emails = [er for ers in email_map.values() for er in ers]
+            send_webhook(args.webhook, flat_emails, duration)
+
+        return 0
+
+    # ========== SCRAPE command: CSV of URLs -> emails ==========
     elif args.command == "scrape":
-        # Load URLs from CSV
         urls = load_urls(args.input)
         if not urls:
             logger.error("No URLs to process")
             sys.exit(1)
+        urls = deduplicate_urls(urls)
 
-    urls = deduplicate_urls(urls)
+        start_time = time.time()
+        all_emails, errors = _run_scrape(urls, args)
+        duration = time.time() - start_time
 
-    # Create scraper
-    scraper_kwargs = {
-        "timeout": args.timeout,
-        "respect_robots": not args.no_robots,
-        "cache_dir": args.cache,
-        "rate_limit": args.rate_limit,
-    }
-    if args.user_agent:
-        scraper_kwargs["user_agent"] = args.user_agent
-
-    start_time = time.time()
-    all_emails: List[EmailResult] = []
-    errors: List[str] = []
-    urls_processed = 0
-
-    def _checkpoint_save():
-        """Save raw (unfiltered) emails to output CSV as crash recovery."""
-        if all_emails and not args.dry_run:
-            save_csv(all_emails, args.output)
-            logger.info(
-                "Checkpoint: saved %d raw emails after %d/%d URLs",
-                len(all_emails), urls_processed, len(urls),
+        raw_count = len(all_emails)
+        if not args.no_filter and not args.dry_run:
+            all_emails = filter_results(
+                all_emails,
+                min_score=args.min_score,
+                require_domain_match=True,
+                max_per_site=args.max_per_site,
+                allow_free_emails=args.allow_free_emails,
             )
 
-    if args.threads > 1:
-        # Parallel execution
-        logger.info("Starting parallel scraping with %d threads", args.threads)
-        scraper = EmailScraper(**scraper_kwargs)
+        print(f"\n{'=' * 60}")
+        print(f"Scraping complete")
+        print(f"{'=' * 60}")
+        print(f"  URLs processed:  {len(urls)}")
+        print(f"  Emails found:    {raw_count}")
+        if not args.no_filter and not args.dry_run:
+            print(f"  After filtering: {len(all_emails)}  (min score: {args.min_score})")
+            print(f"  Filtered out:    {raw_count - len(all_emails)}")
+        print(f"  Errors:          {len(errors)}")
+        print(f"  Duration:        {duration:.1f}s")
+        print(f"{'=' * 60}")
 
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            futures = {
-                executor.submit(scraper.scrape_url, url, args.dry_run): url
-                for url in urls
-            }
+        if not args.dry_run:
+            save_csv(all_emails, args.output)
+            if args.json_output:
+                save_json(all_emails, args.json_output)
+            if args.webhook:
+                send_webhook(args.webhook, all_emails, duration)
 
-            with tqdm(total=len(urls), desc="Scraping", unit="url") as pbar:
-                for future in as_completed(futures):
-                    url = futures[future]
-                    try:
-                        result = future.result()
-                        all_emails.extend(result.emails)
-                        errors.extend(result.errors)
-                    except Exception as e:
-                        logger.error("Unexpected error for %s: %s", url, e)
-                        errors.append(f"Unexpected error for {url}: {e}")
-                    urls_processed += 1
-                    pbar.update(1)
-                    if args.save_every > 0 and urls_processed % args.save_every == 0:
-                        _checkpoint_save()
-    else:
-        # Sequential execution
-        logger.info("Starting sequential scraping")
-        scraper = EmailScraper(**scraper_kwargs)
+        if errors:
+            logger.warning("Encountered %d error(s):", len(errors))
+            for err in errors[:20]:
+                logger.warning("  - %s", err)
+            if len(errors) > 20:
+                logger.warning("  ... and %d more", len(errors) - 20)
 
-        for url in tqdm(urls, desc="Scraping", unit="url"):
-            try:
-                result = scraper.scrape_url(url, args.dry_run)
-                all_emails.extend(result.emails)
-                errors.extend(result.errors)
-            except Exception as e:
-                logger.error("Unexpected error for %s: %s", url, e)
-                errors.append(f"Unexpected error for {url}: {e}")
-            urls_processed += 1
-            if args.save_every > 0 and urls_processed % args.save_every == 0:
-                _checkpoint_save()
-
-    duration = time.time() - start_time
-
-    # Apply campaign filtering
-    raw_count = len(all_emails)
-    if not args.no_filter and not args.dry_run:
-        all_emails = filter_results(
-            all_emails,
-            min_score=args.min_score,
-            require_domain_match=True,
-            max_per_site=args.max_per_site,
-            allow_free_emails=args.allow_free_emails,
-        )
-
-    # Summary
-    print(f"\n{'=' * 60}")
-    print(f"Scraping complete")
-    print(f"{'=' * 60}")
-    print(f"  URLs processed:  {len(urls)}")
-    print(f"  Emails found:    {raw_count}")
-    if not args.no_filter and not args.dry_run:
-        print(f"  After filtering: {len(all_emails)}  (min score: {args.min_score})")
-        print(f"  Filtered out:    {raw_count - len(all_emails)}")
-    print(f"  Errors:          {len(errors)}")
-    print(f"  Duration:        {duration:.1f}s")
-    print(f"{'=' * 60}")
-
-    if not args.dry_run:
-        # Save CSV
-        save_csv(all_emails, args.output)
-
-        # Save JSON if requested
-        if args.json_output:
-            save_json(all_emails, args.json_output)
-
-        # Send webhook if configured
-        if args.webhook:
-            send_webhook(args.webhook, all_emails, duration)
-
-    # Log errors summary
-    if errors:
-        logger.warning("Encountered %d error(s):", len(errors))
-        for err in errors[:20]:  # Show first 20 errors
-            logger.warning("  - %s", err)
-        if len(errors) > 20:
-            logger.warning("  ... and %d more", len(errors) - 20)
-
-    return 0 if not errors else 1
+        return 0 if not errors else 1
 
 
 if __name__ == "__main__":
