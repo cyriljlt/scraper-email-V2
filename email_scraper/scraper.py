@@ -22,9 +22,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (compatible; EmailScraper/1.0; +https://github.com/scraper-email)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 RATE_LIMIT_DELAY = 1.0  # seconds between requests to same domain
+MAX_RETRIES_403 = 2
 
 
 @dataclass
@@ -71,10 +73,19 @@ class EmailScraper:
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept-Encoding": "gzip, deflate",
+            "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Cache-Control": "max-age=0",
         })
 
         if self.cache_dir:
@@ -226,38 +237,53 @@ class EmailScraper:
                 logger.debug("Cache hit: %s", url)
                 return cached
 
-        try:
-            response = self.session.get(
-                url,
-                timeout=self.timeout,
-                allow_redirects=True,
-            )
-            response.raise_for_status()
+        for attempt in range(MAX_RETRIES_403 + 1):
+            try:
+                # On retry for 403, add Referer header to look like navigation
+                extra_headers = {}
+                if attempt > 0:
+                    parsed = urlparse(url)
+                    extra_headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+                    # Small delay before retry
+                    time.sleep(1.0 + attempt)
+                    logger.debug("Retry %d/%d for %s", attempt, MAX_RETRIES_403, url)
 
-            # Check content type - only process HTML
-            content_type = response.headers.get("Content-Type", "")
-            if "text/html" not in content_type and "application/xhtml" not in content_type:
-                logger.warning("Non-HTML content at %s: %s", url, content_type)
-                return None
+                response = self.session.get(
+                    url,
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                    headers=extra_headers,
+                )
+                response.raise_for_status()
 
-            html = response.text
+                # Check content type - only process HTML
+                content_type = response.headers.get("Content-Type", "")
+                if "text/html" not in content_type and "application/xhtml" not in content_type:
+                    logger.warning("Non-HTML content at %s: %s", url, content_type)
+                    return None
 
-            # Save to cache
-            if self.cache_dir:
-                self._save_to_cache(url, html)
+                html = response.text
 
-            return html
+                # Save to cache
+                if self.cache_dir:
+                    self._save_to_cache(url, html)
 
-        except requests.exceptions.Timeout:
-            logger.warning("Timeout fetching %s", url)
-        except requests.exceptions.TooManyRedirects:
-            logger.warning("Too many redirects for %s", url)
-        except requests.exceptions.HTTPError as e:
-            logger.warning("HTTP error for %s: %s", url, e)
-        except requests.exceptions.ConnectionError:
-            logger.warning("Connection error for %s", url)
-        except requests.exceptions.RequestException as e:
-            logger.warning("Request failed for %s: %s", url, e)
+                return html
+
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 403 and attempt < MAX_RETRIES_403:
+                    logger.debug("Got 403 for %s, will retry with Referer", url)
+                    continue
+                logger.warning("HTTP error for %s: %s", url, e)
+            except requests.exceptions.Timeout:
+                logger.warning("Timeout fetching %s", url)
+            except requests.exceptions.TooManyRedirects:
+                logger.warning("Too many redirects for %s", url)
+            except requests.exceptions.ConnectionError:
+                logger.warning("Connection error for %s", url)
+            except requests.exceptions.RequestException as e:
+                logger.warning("Request failed for %s: %s", url, e)
+            break  # Don't retry for non-403 errors
 
         return None
 
