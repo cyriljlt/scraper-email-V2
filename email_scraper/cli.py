@@ -274,6 +274,12 @@ Examples:
         help="Disable campaign filtering (keep all emails including agencies, DPO, etc.)",
     )
     parser.add_argument(
+        "--allow-free-emails",
+        action="store_true",
+        help="Keep emails from free providers (Gmail, Orange, Free, etc.). "
+             "Useful for Solocal/Wix sites where businesses use personal email.",
+    )
+    parser.add_argument(
         "--no-robots",
         action="store_true",
         help="Ignore robots.txt restrictions",
@@ -417,6 +423,7 @@ def main(argv: Optional[List[str]] = None):
             min_score=args.min_score,
             require_domain_match=True,
             max_per_site=args.max_per_site,
+            allow_free_emails=args.allow_free_emails,
         )
 
     # Summary

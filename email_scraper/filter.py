@@ -87,6 +87,7 @@ def is_campaign_worthy(
     email: str,
     target_domain: str,
     require_domain_match: bool = True,
+    allow_free_emails: bool = False,
 ) -> bool:
     """
     Check if an email is suitable for a B2B email campaign.
@@ -111,7 +112,7 @@ def is_campaign_worthy(
     clean_email_domain = re.sub(r"^www\.", "", domain)
 
     # 1. Reject free email / ISP domains
-    if clean_email_domain in FREE_EMAIL_DOMAINS:
+    if not allow_free_emails and clean_email_domain in FREE_EMAIL_DOMAINS:
         logger.debug("Filtered %s: free email provider", email)
         return False
 
@@ -154,6 +155,7 @@ def filter_results(
     min_score: float = 0.7,
     require_domain_match: bool = True,
     max_per_site: int = 1,
+    allow_free_emails: bool = False,
 ) -> list:
     """
     Filter email results for campaign use.
@@ -190,7 +192,7 @@ def filter_results(
             continue
 
         # Campaign worthiness check
-        if not is_campaign_worthy(r.email, target_domain, require_domain_match):
+        if not is_campaign_worthy(r.email, target_domain, require_domain_match, allow_free_emails):
             continue
 
         filtered.append(r)
