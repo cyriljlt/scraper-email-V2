@@ -290,6 +290,13 @@ Examples:
         help="Save logs to file (optional)",
     )
     parser.add_argument(
+        "--save-every",
+        type=int,
+        default=0,
+        help="Save intermediate results every N URLs (crash recovery). "
+             "0 = save only at the end (default: 0)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -327,6 +334,19 @@ def main(argv: Optional[List[str]] = None):
     all_emails: List[EmailResult] = []
     errors: List[str] = []
 
+    # Checkpoint save helper: saves raw (unfiltered) emails periodically
+    # so no data is lost on crash. Filtering is applied only at the end.
+    urls_processed = 0
+
+    def _checkpoint_save():
+        """Save raw emails to output CSV as crash recovery checkpoint."""
+        if args.save_every > 0 and all_emails and not args.dry_run:
+            save_csv(all_emails, args.output)
+            logger.info(
+                "Checkpoint: saved %d raw emails after %d/%d URLs",
+                len(all_emails), urls_processed, len(urls),
+            )
+
     if args.threads > 1:
         # Parallel execution
         logger.info("Starting parallel scraping with %d threads", args.threads)
@@ -348,7 +368,10 @@ def main(argv: Optional[List[str]] = None):
                     except Exception as e:
                         logger.error("Unexpected error for %s: %s", url, e)
                         errors.append(f"Unexpected error for {url}: {e}")
+                    urls_processed += 1
                     pbar.update(1)
+                    if args.save_every > 0 and urls_processed % args.save_every == 0:
+                        _checkpoint_save()
     else:
         # Sequential execution
         logger.info("Starting sequential scraping")
@@ -362,6 +385,9 @@ def main(argv: Optional[List[str]] = None):
             except Exception as e:
                 logger.error("Unexpected error for %s: %s", url, e)
                 errors.append(f"Unexpected error for {url}: {e}")
+            urls_processed += 1
+            if args.save_every > 0 and urls_processed % args.save_every == 0:
+                _checkpoint_save()
 
     duration = time.time() - start_time
 
