@@ -14,6 +14,37 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# Hosted website builder / platform domains.
+# Sites on these platforms use the platform's domain, so the business email
+# will naturally have a DIFFERENT domain. Domain match should be skipped.
+HOSTED_PLATFORM_DOMAINS = {
+    "site-solocal.com",
+    "solocal.com",
+    "wixsite.com",
+    "weebly.com",
+    "squarespace.com",
+    "jimdo.com",
+    "webnode.fr",
+    "webnode.com",
+    "monsite-orange.fr",
+    "e-monsite.com",
+    "sitew.com",
+    "hubside.fr",
+    "wordpress.com",
+    "blogspot.com",
+    "shopify.com",
+    "strikingly.com",
+}
+
+
+def _is_hosted_platform(domain: str) -> bool:
+    """Check if a domain belongs to a hosted website builder."""
+    domain = domain.lower()
+    for platform in HOSTED_PLATFORM_DOMAINS:
+        if domain == platform or domain.endswith("." + platform):
+            return True
+    return False
+
 
 # Free email / ISP / webmail domains — never useful for B2B campaigns
 FREE_EMAIL_DOMAINS = {
@@ -100,7 +131,9 @@ def is_campaign_worthy(
             return False
 
     # 4. Domain match check
-    if require_domain_match:
+    # Skip domain match for hosted platforms (Solocal, Wix, etc.)
+    # where the business email naturally uses a different domain.
+    if require_domain_match and not _is_hosted_platform(clean_target):
         # Allow exact match or subdomain relationship
         if clean_email_domain != clean_target:
             if not (
