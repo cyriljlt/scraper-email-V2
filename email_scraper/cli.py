@@ -144,6 +144,24 @@ def save_csv(results: List[EmailResult], output_path: str):
     logger.info("Results saved to %s (%d rows)", output_path, len(df))
 
 
+def save_intermediate_results(all_emails: List[EmailResult], output_path: str, processed_count: int, total_urls: int):
+    """Save intermediate results to CSV with backup."""
+    # Create backup of existing file if it exists
+    backup_path = f"{output_path}.backup"
+    if Path(output_path).exists():
+        try:
+            import shutil
+            shutil.copy2(output_path, backup_path)
+            logger.debug("Created backup: %s", backup_path)
+        except Exception as e:
+            logger.warning("Failed to create backup: %s", e)
+    
+    # Save current results
+    save_csv(all_emails, output_path)
+    logger.info("INTERMEDIATE SAVE: %d emails from %d/%d URLs saved to %s", 
+                len(all_emails), processed_count, total_urls, output_path)
+
+
 def save_json(results: List[EmailResult], output_path: str):
     """Save results to JSON with full metadata."""
     data = [r.to_dict() for r in results]
@@ -314,6 +332,8 @@ def main(argv: Optional[List[str]] = None):
     start_time = time.time()
     all_emails: List[EmailResult] = []
     errors: List[str] = []
+    processed_count = 0
+    SAVE_INTERVAL = 100  # Save every 100 URLs
 
     if args.threads > 1:
         # Parallel execution
@@ -333,9 +353,24 @@ def main(argv: Optional[List[str]] = None):
                         result = future.result()
                         all_emails.extend(result.emails)
                         errors.extend(result.errors)
+                        processed_count += 1
+                        
+                        # Save intermediate results every SAVE_INTERVAL URLs
+                        if processed_count % SAVE_INTERVAL == 0 and not args.dry_run:
+                            # Apply filtering for intermediate save
+                            intermediate_emails = all_emails.copy()
+                            if not args.no_filter:
+                                intermediate_emails = filter_results(
+                                    intermediate_emails,
+                                    min_score=args.min_score,
+                                    require_domain_match=True,
+                                )
+                            save_intermediate_results(intermediate_emails, args.output, processed_count, len(urls))
+                            
                     except Exception as e:
                         logger.error("Unexpected error for %s: %s", url, e)
                         errors.append(f"Unexpected error for {url}: {e}")
+                        processed_count += 1
                     pbar.update(1)
     else:
         # Sequential execution
@@ -347,9 +382,24 @@ def main(argv: Optional[List[str]] = None):
                 result = scraper.scrape_url(url, args.dry_run)
                 all_emails.extend(result.emails)
                 errors.extend(result.errors)
+                processed_count += 1
+                
+                # Save intermediate results every SAVE_INTERVAL URLs
+                if processed_count % SAVE_INTERVAL == 0 and not args.dry_run:
+                    # Apply filtering for intermediate save
+                    intermediate_emails = all_emails.copy()
+                    if not args.no_filter:
+                        intermediate_emails = filter_results(
+                            intermediate_emails,
+                            min_score=args.min_score,
+                            require_domain_match=True,
+                        )
+                    save_intermediate_results(intermediate_emails, args.output, processed_count, len(urls))
+                        
             except Exception as e:
                 logger.error("Unexpected error for %s: %s", url, e)
                 errors.append(f"Unexpected error for {url}: {e}")
+                processed_count += 1
 
     duration = time.time() - start_time
 
