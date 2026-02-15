@@ -171,16 +171,23 @@ def filter_results(
     filtered = []
 
     for r in results:
-        # Score threshold
-        if r.confidence_score < min_score:
-            logger.debug(
-                "Filtered %s: score %.2f < %.2f",
-                r.email, r.confidence_score, min_score,
-            )
-            continue
-
         # Extract target domain from the input URL
         target_domain = _extract_domain(r.url)
+
+        # For hosted platforms (Solocal, Wix, etc.), use a lower score
+        # threshold since domain-match scoring is inherently limited.
+        # All other quality filters (free email, tool domain, etc.) still apply.
+        effective_min = min_score
+        if _is_hosted_platform(target_domain):
+            effective_min = max(min_score - 0.30, 0.1)
+
+        # Score threshold
+        if r.confidence_score < effective_min:
+            logger.debug(
+                "Filtered %s: score %.2f < %.2f",
+                r.email, r.confidence_score, effective_min,
+            )
+            continue
 
         # Campaign worthiness check
         if not is_campaign_worthy(r.email, target_domain, require_domain_match):
