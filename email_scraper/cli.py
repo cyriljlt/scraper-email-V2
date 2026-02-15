@@ -245,6 +245,12 @@ Examples:
         help="Minimum confidence score to keep an email (default: 0.7)",
     )
     parser.add_argument(
+        "--max-per-site",
+        type=int,
+        default=1,
+        help="Max emails to keep per site (default: 1, best for campaigns. 0 = unlimited)",
+    )
+    parser.add_argument(
         "--no-filter",
         action="store_true",
         help="Disable campaign filtering (keep all emails including agencies, DPO, etc.)",
@@ -360,6 +366,7 @@ def main(argv: Optional[List[str]] = None):
             all_emails,
             min_score=args.min_score,
             require_domain_match=True,
+            max_per_site=args.max_per_site,
         )
 
     # Summary

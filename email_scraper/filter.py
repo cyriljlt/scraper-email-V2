@@ -120,6 +120,7 @@ def filter_results(
     results: list,
     min_score: float = 0.7,
     require_domain_match: bool = True,
+    max_per_site: int = 1,
 ) -> list:
     """
     Filter email results for campaign use.
@@ -128,6 +129,7 @@ def filter_results(
         results: List of EmailResult objects
         min_score: Minimum confidence score (0.0-1.0)
         require_domain_match: If True, only keep emails matching site domain
+        max_per_site: Max emails to keep per input URL/site (0 = unlimited)
 
     Returns:
         Filtered list of EmailResult objects
@@ -153,6 +155,10 @@ def filter_results(
 
         filtered.append(r)
 
+    # Limit emails per site: keep the best N per input URL
+    if max_per_site > 0:
+        filtered = _limit_per_site(filtered, max_per_site)
+
     removed = original_count - len(filtered)
     if removed > 0:
         logger.info(
@@ -161,6 +167,67 @@ def filter_results(
         )
 
     return filtered
+
+
+# Priority for selecting the best email per site.
+# Lower number = higher priority. "contact@" is ideal for cold outreach.
+_LOCAL_PART_PRIORITY = {
+    "contact": 0,
+    "info": 1,
+    "hello": 2,
+    "bonjour": 3,
+    "accueil": 4,
+    "commercial": 5,
+    "direction": 6,
+}
+
+
+def _email_campaign_sort_key(result) -> tuple:
+    """
+    Sort key to pick the best email for campaigns.
+
+    Priority order:
+    1. Generic contact emails (contact@, info@, hello@) — best for cold outreach
+    2. Highest confidence score
+    3. Found on contact page (vs legal/about)
+    """
+    local = result.email.split("@")[0].lower()
+    # Priority bucket: known generic roles get low number (= high priority)
+    priority = _LOCAL_PART_PRIORITY.get(local, 50)
+    # For non-generic emails, prefer firstname.lastname over random strings
+    if priority == 50 and "." in local:
+        priority = 30  # firstname.lastname = decent for campaigns
+    # Page type bonus: contact page results are more reliable
+    page_bonus = 0
+    if "contact" in result.source_page.lower():
+        page_bonus = 1
+    # Sort: lower priority number first, then higher score, then contact page
+    return (priority, -result.confidence_score, -page_bonus)
+
+
+def _limit_per_site(results: list, max_per_site: int) -> list:
+    """Keep only the best N emails per input URL (site)."""
+    from collections import defaultdict
+
+    by_site: Dict[str, list] = defaultdict(list)
+    for r in results:
+        site_key = _extract_domain(r.url)
+        by_site[site_key].append(r)
+
+    limited = []
+    for site, emails in by_site.items():
+        emails.sort(key=_email_campaign_sort_key)
+        kept = emails[:max_per_site]
+        limited.extend(kept)
+        if len(emails) > max_per_site:
+            logger.debug(
+                "%s: kept %d/%d emails (best: %s)",
+                site, max_per_site, len(emails), kept[0].email,
+            )
+
+    # Preserve original ordering (by confidence desc)
+    limited.sort(key=lambda r: r.confidence_score, reverse=True)
+    return limited
 
 
 def _extract_domain(url: str) -> str:
