@@ -3,11 +3,13 @@
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import pandas as pd
 from tqdm import tqdm
@@ -79,6 +81,46 @@ def load_urls(input_path: str) -> List[str]:
 
     logger.info("Loaded %d URLs from %s (column: '%s')", len(urls), input_path, url_col)
     return urls
+
+
+def _extract_root_domain(url: str) -> str:
+    """Extract root domain from URL for deduplication.
+
+    Normalizes: http/https, www prefix, trailing paths, query strings.
+    Examples:
+        https://www.tacher-acogex.com/nous-connaitre/falaise/ → tacher-acogex.com
+        http://www.tacher-acogex.com/ → tacher-acogex.com
+        tacher-acogex.com → tacher-acogex.com
+    """
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    netloc = urlparse(url).netloc.lower()
+    # Strip www. prefix
+    netloc = re.sub(r"^www\.", "", netloc)
+    # Strip port if present
+    netloc = netloc.split(":")[0]
+    return netloc
+
+
+def deduplicate_urls(urls: List[str]) -> List[str]:
+    """Deduplicate URLs by root domain, keeping the first occurrence.
+
+    When the CSV has multiple URLs for the same site (http vs https,
+    with/without www, different subpages), keep only one per domain.
+    """
+    seen: Dict[str, str] = {}
+    for url in urls:
+        domain = _extract_root_domain(url)
+        if domain and domain not in seen:
+            seen[domain] = url
+    deduped = list(seen.values())
+    if len(deduped) < len(urls):
+        logger.info(
+            "Deduplicated %d URLs → %d unique domains (removed %d duplicates)",
+            len(urls), len(deduped), len(urls) - len(deduped)
+        )
+    return deduped
 
 
 def save_csv(results: List[EmailResult], output_path: str):
@@ -240,11 +282,12 @@ def main(argv: Optional[List[str]] = None):
     # Setup logging
     setup_logging(args.verbose, args.log_file)
 
-    # Load URLs
+    # Load URLs and deduplicate by domain
     urls = load_urls(args.input)
     if not urls:
         logger.error("No URLs to process")
         sys.exit(1)
+    urls = deduplicate_urls(urls)
 
     # Create scraper
     scraper_kwargs = {
