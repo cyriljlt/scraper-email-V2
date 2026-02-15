@@ -62,8 +62,8 @@ def compute_confidence(
         domain_match = "partial"
     else:
         # Different domain: likely a third-party (web agency, service provider)
-        # Apply a penalty instead of a bonus
-        score -= 0.10
+        # Strong penalty — these are almost never the business's own email
+        score -= 0.25
         domain_match = "different"
 
     # --- Factor 3: Page type (max 0.20) ---
@@ -87,7 +87,7 @@ def compute_confidence(
                                   "/donnees-personnelles"]
         )
         if is_legal_page:
-            score -= 0.10  # Strong penalty: different domain on legal page
+            score -= 0.15  # Extra penalty: different domain on legal page
 
     # --- Factor 4: Semantic context (max 0.15) ---
     context_score = _check_context(email, page_text)
