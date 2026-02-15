@@ -1,3 +1,3 @@
-"""Email scraper - Extract emails from URLs listed in a CSV file."""
+"""Email scraper - Search Google for websites and extract their emails."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

@@ -17,6 +17,7 @@ from tqdm import tqdm
 from . import __version__
 from .scraper import EmailScraper, ScrapeResult, EmailResult
 from .filter import filter_results
+from .google_search import search_google, search_multiple_keywords
 
 logger = logging.getLogger("email_scraper")
 
@@ -175,27 +176,8 @@ def send_webhook(webhook_url: str, results: List[EmailResult], duration: float):
         logger.warning("Failed to send webhook: %s", e)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="email-scraper",
-        description="Extract emails from URLs listed in a CSV file.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s -i urls.csv -o results.csv
-  %(prog)s -i urls.csv -o results.csv -t 4 --timeout 20 -vv
-  %(prog)s -i urls.csv -o results.csv --json results.json --cache .cache
-  %(prog)s -i urls.csv -o results.csv --dry-run -v
-  %(prog)s -i urls.csv -o results.csv --webhook https://hooks.example.com/notify
-        """,
-    )
-
-    parser.add_argument(
-        "-i", "--input",
-        required=True,
-        help="Input CSV file with a 'url' column",
-    )
+def _add_common_scraper_args(parser: argparse.ArgumentParser):
+    """Add scraper arguments common to both 'scrape' and 'search' commands."""
     parser.add_argument(
         "-o", "--output",
         required=True,
@@ -295,13 +277,102 @@ Examples:
         default=100,
         help="Save raw checkpoint every N URLs for crash recovery (default: 100)",
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="email-scraper",
+        description="Extract emails from websites found via Google search or from a CSV of URLs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
     )
 
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- 'scrape' command (existing behavior) ---
+    scrape_parser = subparsers.add_parser(
+        "scrape",
+        help="Extract emails from URLs listed in a CSV file",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s -i urls.csv -o results.csv
+  %(prog)s -i urls.csv -o results.csv -t 4 --timeout 20 -vv
+  %(prog)s -i urls.csv -o results.csv --json results.json --cache .cache
+        """,
+    )
+    scrape_parser.add_argument(
+        "-i", "--input",
+        required=True,
+        help="Input CSV file with a 'url' column",
+    )
+    _add_common_scraper_args(scrape_parser)
+
+    # --- 'search' command (new: keywords → Google → emails) ---
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Search Google for keywords, then extract emails from found sites",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s search -k "plombier Paris" -o results.csv
+  %(prog)s search -k "plombier Paris" -k "chauffagiste Paris" -o results.csv -n 50
+  %(prog)s search -k "dentiste Lyon" -o results.csv --lang fr --country fr -vv
+  %(prog)s search -k "electricien Marseille" -o results.csv --save-urls urls_found.csv
+        """,
+    )
+    search_parser.add_argument(
+        "-k", "--keywords",
+        action="append",
+        required=True,
+        help="Search keywords (can be specified multiple times for multiple searches). "
+             "Example: -k 'plombier Paris' -k 'chauffagiste Paris'",
+    )
+    search_parser.add_argument(
+        "-n", "--num-results",
+        type=int,
+        default=20,
+        help="Number of Google results to collect per keyword group (default: 20)",
+    )
+    search_parser.add_argument(
+        "--lang",
+        type=str,
+        default="fr",
+        help="Search language (default: fr)",
+    )
+    search_parser.add_argument(
+        "--country",
+        type=str,
+        default="fr",
+        help="Search country (default: fr)",
+    )
+    search_parser.add_argument(
+        "--search-delay",
+        type=float,
+        default=2.0,
+        help="Delay between Google search pages in seconds (default: 2.0)",
+    )
+    search_parser.add_argument(
+        "--save-urls",
+        type=str,
+        default=None,
+        help="Save found URLs to a CSV file (optional, useful for re-running scrape later)",
+    )
+    _add_common_scraper_args(search_parser)
+
     return parser
+
+
+def _save_urls_csv(urls: List[str], output_path: str):
+    """Save a list of URLs to a CSV file."""
+    df = pd.DataFrame({"url": urls})
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    logger.info("URLs saved to %s (%d rows)", output_path, len(urls))
 
 
 def main(argv: Optional[List[str]] = None):
@@ -309,14 +380,61 @@ def main(argv: Optional[List[str]] = None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
     # Setup logging
     setup_logging(args.verbose, args.log_file)
 
-    # Load URLs and deduplicate by domain
-    urls = load_urls(args.input)
-    if not urls:
-        logger.error("No URLs to process")
-        sys.exit(1)
+    # Resolve URLs based on command
+    if args.command == "search":
+        # Google search → collect URLs
+        keyword_groups = [k.split() for k in args.keywords]
+        print(f"\nSearching Google for {len(keyword_groups)} keyword group(s)...")
+        for i, kw in enumerate(args.keywords):
+            print(f"  [{i+1}] {kw}")
+        print()
+
+        if len(keyword_groups) == 1:
+            urls = search_google(
+                keywords=keyword_groups[0],
+                num_results=args.num_results,
+                lang=args.lang,
+                country=args.country,
+                delay=args.search_delay,
+                timeout=args.timeout,
+                user_agent=args.user_agent,
+            )
+        else:
+            urls = search_multiple_keywords(
+                keyword_groups=keyword_groups,
+                num_results_per_keyword=args.num_results,
+                lang=args.lang,
+                country=args.country,
+                delay=args.search_delay,
+                timeout=args.timeout,
+                user_agent=args.user_agent,
+            )
+
+        if not urls:
+            logger.error("No URLs found from Google search")
+            sys.exit(1)
+
+        print(f"Found {len(urls)} unique website(s) from Google search\n")
+
+        # Optionally save found URLs
+        if args.save_urls:
+            _save_urls_csv(urls, args.save_urls)
+            print(f"URLs saved to {args.save_urls}\n")
+
+    elif args.command == "scrape":
+        # Load URLs from CSV
+        urls = load_urls(args.input)
+        if not urls:
+            logger.error("No URLs to process")
+            sys.exit(1)
+
     urls = deduplicate_urls(urls)
 
     # Create scraper
